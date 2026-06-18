@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "restlytics"
+version = "0.1.0"
+description = "restlytics Python SDK — zero-config request, DB, HTTP and cache tracing shipped to restlytics in OTLP/JSON. Pure stdlib core, fire-and-forget, no third-party runtime deps."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "restlytics", email = "support@restlytics.com" }]
+keywords = [
+    "observability",
+    "tracing",
+    "otlp",
+    "apm",
+    "performance",
+    "n+1",
+    "django",
+    "fastapi",
+    "flask",
+    "restlytics",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+# The core has NO third-party runtime dependencies (pure stdlib), so importing
+# restlytics is always safe and lightweight. Framework adapters use whatever you
+# already have installed.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/restlytics/restlytics-python"
+Documentation = "https://github.com/restlytics/restlytics-python#readme"
+Source = "https://github.com/restlytics/restlytics-python"
+Issues = "https://github.com/restlytics/restlytics-python/issues"
+
+[project.optional-dependencies]
+# Convenience extras — install the framework alongside the SDK. The adapters work
+# with any reasonably recent version; pins are intentionally loose.
+django = ["django>=3.2"]
+fastapi = ["fastapi>=0.95", "starlette>=0.27"]
+flask = ["flask>=2.0"]
+sqlalchemy = ["sqlalchemy>=1.4"]
+http = ["requests>=2.25"]
+httpx = ["httpx>=0.23"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["restlytics*"]
+
+[tool.setuptools.package-data]
+restlytics = ["py.typed"]
