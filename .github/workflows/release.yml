@@ -1,0 +1,94 @@
+name: Release
+
+# When a PR is merged into main, the semver label on that PR decides the bump.
+# We compute the next version from the latest vX.Y.Z tag, bump the version in
+# the source/manifest, then create the tag + GitHub Release.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag & release
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine bump from label
+        id: bump
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          level=""
+          if   printf '%s' "$LABELS" | grep -q '"semver:major"'; then level=major
+          elif printf '%s' "$LABELS" | grep -q '"semver:minor"'; then level=minor
+          elif printf '%s' "$LABELS" | grep -q '"semver:patch"'; then level=patch
+          fi
+          if [ -z "$level" ]; then
+            echo "No semver:* label on the merged PR; skipping release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Bump level: $level"
+            echo "level=$level" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute next version
+        id: ver
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet
+          latest=$(git tag -l 'v[0-9]*' | sort -V | tail -n1)
+          latest=${latest:-v0.0.0}
+          cur=${latest#v}
+          IFS='.' read -r MA MI PA <<< "$cur"
+          MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
+          case "${{ steps.bump.outputs.level }}" in
+            major) MA=$((MA+1)); MI=0; PA=0 ;;
+            minor) MI=$((MI+1)); PA=0 ;;
+            patch) PA=$((PA+1)) ;;
+          esac
+          new="${MA}.${MI}.${PA}"
+          echo "Previous tag: $latest  ->  new version: v$new"
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+          echo "tag=v$new" >> "$GITHUB_OUTPUT"
+
+      - name: Bump version in sources
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed -i -E 's/^version = "[^"]*"/version = "'"$VERSION"'"/' pyproject.toml
+          sed -i -E 's/^SDK_VERSION = "[^"]*"/SDK_VERSION = "'"$VERSION"'"/' restlytics/otlp.py
+
+      - name: Commit, tag, and release
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --quiet; then
+            git commit -am "chore(release): ${TAG} [skip ci]"
+            git push origin HEAD:main
+          else
+            echo "No source changes to commit (tag-only release)."
+          fi
+          git tag -a "${TAG}" -m "${TAG}"
+          git push origin "${TAG}"
+          gh release create "${TAG}" --title "${TAG}" --generate-notes

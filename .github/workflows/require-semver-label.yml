@@ -1,0 +1,38 @@
+name: Require semver label
+
+# A PR cannot be merged unless it carries exactly one of:
+#   semver:major   semver:minor   semver:patch
+# Mark this check ("Require semver label") as a required status check in the
+# branch protection / ruleset for `main` to actually block merges.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  require-label:
+    name: Require semver label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for exactly one semver:* label
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          # Match the whole quoted JSON token so a label like "semver:minorish"
+          # can never be mistaken for "semver:minor".
+          matched=$(printf '%s' "$LABELS" | grep -oE '"semver:(major|minor|patch)"' | sort -u || true)
+          if [ -z "$matched" ]; then
+            count=0
+          else
+            count=$(printf '%s\n' "$matched" | grep -c .)
+          fi
+          echo "Labels on PR: $LABELS"
+          echo "Matched semver labels: ${matched:-<none>}"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::This PR must carry exactly one semver label (semver:major, semver:minor, or semver:patch). Found: $count."
+            exit 1
+          fi
+          echo "OK: exactly one semver label present."
