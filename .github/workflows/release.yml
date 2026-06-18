@@ -1,8 +1,13 @@
 name: Release
 
 # When a PR is merged into main, the semver label on that PR decides the bump.
-# We compute the next version from the latest vX.Y.Z tag, bump the version in
-# the source/manifest, then create the tag + GitHub Release.
+# We compute the next version from the latest vX.Y.Z tag, bake that version into
+# the tagged commit, then push the tag + create a GitHub Release.
+#
+# We deliberately do NOT push a commit back to main: main is branch-protected
+# (the "Require semver label" check only runs on PRs, so a direct push by the
+# bot could be rejected). The git tag is the source of truth for released
+# versions; the next release computes the bump from the latest tag.
 on:
   pull_request:
     types: [closed]
@@ -24,6 +29,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.base.ref }}
 
       - name: Determine bump from label
         id: bump
@@ -74,7 +80,7 @@ jobs:
           sed -i -E 's/^version = "[^"]*"/version = "'"$VERSION"'"/' pyproject.toml
           sed -i -E 's/^SDK_VERSION = "[^"]*"/SDK_VERSION = "'"$VERSION"'"/' restlytics/otlp.py
 
-      - name: Commit, tag, and release
+      - name: Tag and release
         if: steps.bump.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -83,11 +89,9 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Bake the bumped version into the tagged commit (not pushed to main).
           if ! git diff --quiet; then
-            git commit -am "chore(release): ${TAG} [skip ci]"
-            git push origin HEAD:main
-          else
-            echo "No source changes to commit (tag-only release)."
+            git commit -am "chore(release): ${TAG}"
           fi
           git tag -a "${TAG}" -m "${TAG}"
           git push origin "${TAG}"
