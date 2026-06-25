@@ -96,3 +96,26 @@ jobs:
           git tag -a "${TAG}" -m "${TAG}"
           git push origin "${TAG}"
           gh release create "${TAG}" --title "${TAG}" --generate-notes
+
+      # --- Publish to PyPI (best-effort: skips if PYPI_API_TOKEN is not configured) ---
+      - name: Set up Python
+        if: steps.bump.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build and publish to PyPI
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TWINE_PASSWORD:-}" ]; then
+            echo "::warning::PYPI_API_TOKEN not set — skipping PyPI publish for ${TAG}."
+            exit 0
+          fi
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine upload --non-interactive dist/*
