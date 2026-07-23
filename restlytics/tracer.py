@@ -115,8 +115,11 @@ class Tracer:
         if incoming is not None:
             state.trace_id = incoming.trace_id
             state.root_parent_span_id = incoming.parent_span_id
-            # Respect an upstream "not sampled" decision; only re-roll if sampled.
-            state.sampled = incoming.sampled and self._sample_decision(state.trace_id)
+            # Honor the upstream sampled bit EXACTLY -- the decision is made once,
+            # by whoever started the trace. Re-rolling locally would let this
+            # service drop a trace its caller kept, tearing distributed traces in
+            # half whenever ``sample_rate`` is below 1.0.
+            state.sampled = incoming.sampled
         else:
             state.trace_id = ids.trace_id()
             state.root_parent_span_id = None
