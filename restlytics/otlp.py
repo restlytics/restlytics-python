@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence
 # name. ``telemetry.sdk.name`` is ``restlytics-<lang>`` per SPEC section 4.
 SDK_NAME = "restlytics-python"
 SDK_LANGUAGE = "python"
-SDK_VERSION = "0.1.0"
+SDK_VERSION = "0.1.2"
 
 # OTLP SpanKind enum values we use.
 KIND_INTERNAL = 1
