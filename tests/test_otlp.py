@@ -141,6 +141,34 @@ class TracerFlushTest(unittest.TestCase):
         self.assertEqual("00f067aa0ba902b7", root.parent_span_id)
         tracer.finish_server_span()
 
+    def test_continued_trace_inherits_upstream_sampled_flag(self):
+        # sample_rate 0.0 would drop everything if we re-rolled locally; a
+        # continued trace must be kept because the upstream already said "keep".
+        transport = LogTransport()
+        tracer = Tracer(transport, "svc", "production", sample_rate=0.0)
+        tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        tracer.start_server_span("GET /", traceparent=tp)
+        self.assertTrue(tracer.is_sampled())
+        tracer.finish_server_span()
+        self.assertEqual(1, len(transport.payloads))
+
+    def test_continued_trace_honors_upstream_not_sampled_flag(self):
+        transport = LogTransport()
+        tracer = Tracer(transport, "svc", "production", sample_rate=1.0)
+        tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
+        tracer.start_server_span("GET /", traceparent=tp)
+        self.assertFalse(tracer.is_sampled())
+        tracer.finish_server_span()
+        self.assertEqual([], transport.payloads)
+
+    def test_root_trace_still_rolls_locally(self):
+        transport = LogTransport()
+        tracer = Tracer(transport, "svc", "production", sample_rate=0.0)
+        tracer.start_server_span("GET /")  # no traceparent: this IS the head
+        self.assertFalse(tracer.is_sampled())
+        tracer.finish_server_span()
+        self.assertEqual([], transport.payloads)
+
     def test_buffer_cap_enforced(self):
         transport = LogTransport()
         tracer = Tracer(transport, "svc", "production", sample_rate=1.0, max_spans=3)
