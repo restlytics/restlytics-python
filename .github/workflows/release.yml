@@ -12,6 +12,18 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+  # Manual escape hatch. GitHub can drop the pull_request:closed event — when that
+  # happens the change is merged to main but never tagged, and there was previously
+  # no way to re-fire the release. Run this from the Actions tab AGAINST MAIN and
+  # pick the bump level; the new version is computed from the latest tag either way.
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump level
+        required: true
+        default: patch
+        type: choice
+        options: [patch, minor, major]
 
 permissions:
   contents: write
@@ -23,22 +35,28 @@ concurrency:
 jobs:
   release:
     name: Tag & release
-    if: github.event.pull_request.merged == true
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.base.ref }}
+          # No PR context on a manual run; fall back to the dispatched ref.
+          ref: ${{ github.event.pull_request.base.ref || github.ref }}
 
-      - name: Determine bump from label
+      - name: Determine bump level
         id: bump
         env:
+          EVENT: ${{ github.event_name }}
+          INPUT_LEVEL: ${{ inputs.bump }}
           LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
         run: |
           set -euo pipefail
           level=""
-          if   printf '%s' "$LABELS" | grep -q '"semver:major"'; then level=major
+          if [ "$EVENT" = workflow_dispatch ]; then
+            # Manual run: the level comes from the dispatch input, not a PR label.
+            level="$INPUT_LEVEL"
+          elif printf '%s' "$LABELS" | grep -q '"semver:major"'; then level=major
           elif printf '%s' "$LABELS" | grep -q '"semver:minor"'; then level=minor
           elif printf '%s' "$LABELS" | grep -q '"semver:patch"'; then level=patch
           fi
