@@ -12,10 +12,10 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
-  # Manual escape hatch. GitHub can drop the pull_request:closed event — when that
-  # happens the change is merged to main but never tagged, and there was previously
-  # no way to re-fire the release. Run this from the Actions tab AGAINST MAIN and
-  # pick the bump level; the new version is computed from the latest tag either way.
+  # Manual escape hatch: the merge trigger above is the only automatic path, so a
+  # release run that fails, is cancelled, or otherwise leaves main untagged cannot
+  # be retried without this. Run it from the Actions tab AGAINST MAIN and pick the
+  # bump level; the new version is computed from the latest tag either way.
   workflow_dispatch:
     inputs:
       bump:
