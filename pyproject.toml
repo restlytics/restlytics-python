@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "restlytics"
-version = "0.1.0"
+version = "0.2.0"
 description = "restlytics Python SDK — zero-config request, DB, HTTP and cache tracing shipped to restlytics in OTLP/JSON. Pure stdlib core, fire-and-forget, no third-party runtime deps."
 readme = "README.md"
 requires-python = ">=3.9"
