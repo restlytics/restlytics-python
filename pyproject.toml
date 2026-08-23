@@ -55,7 +55,7 @@ flask = ["flask>=2.0"]
 sqlalchemy = ["sqlalchemy>=1.4"]
 http = ["requests>=2.25"]
 httpx = ["httpx>=0.23"]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "httpx>=0.23"]
 
 [tool.setuptools.packages.find]
 where = ["."]

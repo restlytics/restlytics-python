@@ -216,7 +216,10 @@ the OTLP wire shape) and run with **zero** third-party dependencies.
 CI pins [`restlytics/sdk-conformance@v1.1.0`](https://github.com/restlytics/sdk-conformance)
 and compares the vendored fixture before testing. The suite proves exact semantic OTLP output,
 W3C propagation, root sampling, source redaction, and error-status behavior shared by all seven SDKs.
-This is the wire-level gate; real Django/FastAPI/Flask application validation is tracked separately.
+The release gate also boots a real FastAPI application and sends its request telemetry over gzip HTTP
+to a deployed-compatible ingest server. It proves route templates, trace continuation, 202/503 handling,
+error status, and that the project key plus request secrets stay out of the payload. FastAPI is beta-validated;
+Django and Flask remain preview until they pass the same real-app gate.
 
 ## License
 
