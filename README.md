@@ -149,8 +149,8 @@ restlytics.instrument_requests()   # for the `requests` library
 restlytics.instrument_httpx()      # for the `httpx` library
 ```
 
-The `url.full` query string is redacted of sensitive keys; request/response
-bodies are never captured.
+Every `url.full` query value is redacted and credentials/fragments are removed;
+request/response headers and bodies are never captured.
 
 ---
 
@@ -194,8 +194,8 @@ no-op transport and stays completely inert.
 - **Fire-and-forget**: the OTLP POST runs on a daemon thread after the response,
   with a hard ~2s timeout. A slow or down ingest endpoint never affects requests.
 - **Never throws**: every instrument path swallows its own errors.
-- **Redaction**: SQL normalized (literals stripped), bindings only counted,
-  outbound query strings + sensitive headers scrubbed, no request/response bodies.
+- **Redaction**: SQL normalized (literals stripped), bindings only counted, every outbound
+  query value scrubbed, and no request/response headers, bodies, or exception content exported.
 - **Bounded**: per-request span buffer capped (default 2000), state reset per
   request via `contextvars` (thread- and asyncio-safe).
 
@@ -210,6 +210,13 @@ python3 -m unittest discover -s tests
 
 The unit tests cover **SQL normalization** and **interval-union self-time** (plus
 the OTLP wire shape) and run with **zero** third-party dependencies.
+
+## Cross-language conformance
+
+CI pins [`restlytics/sdk-conformance@v1.1.0`](https://github.com/restlytics/sdk-conformance)
+and compares the vendored fixture before testing. The suite proves exact semantic OTLP output,
+W3C propagation, root sampling, source redaction, and error-status behavior shared by all seven SDKs.
+This is the wire-level gate; real Django/FastAPI/Flask application validation is tracked separately.
 
 ## License
 
