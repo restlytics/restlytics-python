@@ -57,8 +57,8 @@ class OtlpSpanTest(unittest.TestCase):
     def test_status_only_present_when_set(self):
         span = Span("a" * 32, "b" * 16, None, "GET /", KIND_SERVER, 1, 2)
         self.assertNotIn("status", span.to_otlp())
-        span.set_status(2, "boom")
-        self.assertEqual({"code": 2, "message": "boom"}, span.to_otlp()["status"])
+        span.set_status(2, "boom with alice@example.test")
+        self.assertEqual({"code": 2}, span.to_otlp()["status"])
 
 
 class PayloadShapeTest(unittest.TestCase):
