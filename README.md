@@ -173,7 +173,7 @@ don't over-count) on the SERVER span and fire-and-forgets the gzipped OTLP batch
 ## Transports & testing
 
 ```python
-from restlytics.transport import LogTransport, NullTransport
+from restlytics.transport import LogTransport, NullTransport, PreviewTransport
 import restlytics
 
 # Capture payloads instead of sending (great for tests):
@@ -184,8 +184,12 @@ assert lt.payloads  # list of the OTLP dicts that would have been sent
 ```
 
 `RESTLYTICS_TRANSPORT=null` disables delivery while keeping instrumentation;
-`=log` captures/logs payloads. With no `RESTLYTICS_KEY`, the SDK installs a
-no-op transport and stays completely inert.
+`=log` captures/logs payloads. `RESTLYTICS_TRANSPORT=preview` needs no ingest key
+and emits a structured local report containing the redacted production payload,
+configured sampling rate, span count, and JSON/gzip byte sizes. It explicitly
+reports `networkRequestMade: false` and never opens a socket. Set
+`RESTLYTICS_SAMPLE_RATE=1` for a deterministic one-request review. With no key
+and any non-preview transport, the SDK stays completely inert.
 
 ---
 

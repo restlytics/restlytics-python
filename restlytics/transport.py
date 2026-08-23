@@ -87,6 +87,54 @@ class LogTransport(Transport):
                 pass
 
 
+class PreviewTransport(Transport):
+    """Structured, local-only production payload preview; never opens a socket."""
+
+    def __init__(
+        self,
+        sample_rate: float,
+        sink: Optional[Callable[[str], None]] = print,
+    ) -> None:
+        self.sample_rate = sample_rate
+        self.reports: List[Dict[str, Any]] = []
+        self._sink = sink
+
+    def send(self, payload: Dict[str, Any]) -> None:
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            span_count = sum(
+                len(scope.get("spans", []))
+                for resource in payload.get("resourceSpans", [])
+                for scope in resource.get("scopeSpans", [])
+            )
+            report = {
+                "mode": "preview",
+                "networkRequestMade": False,
+                "signal": "traces",
+                "configuredSampleRate": self.sample_rate,
+                "sampled": True,
+                "spanCount": span_count,
+                "jsonBytes": len(encoded),
+                "gzipBytes": len(gzip.compress(encoded, compresslevel=6)),
+                "redactionPolicyApplied": [
+                    "url query values and URL credentials",
+                    "sensitive headers and credentials",
+                    "request and response bodies",
+                    "exception messages and stack traces",
+                    "SQL binding values",
+                ],
+                "payload": payload,
+            }
+            self.reports.append(report)
+            if len(self.reports) > 16:
+                del self.reports[0]
+            if self._sink is not None:
+                self._sink(json.dumps(report, ensure_ascii=False, indent=2))
+        except Exception:
+            # Preview retains the SDK's never-raise guarantee.
+            pass
+
+
 class HttpTransport(Transport):
     """Default transport: gzip the JSON body and POST it via ``urllib``.
 
@@ -270,13 +318,16 @@ def build_transport(
     key: str,
     timeout_ms: int = 2000,
     on_error: Optional[Callable[[str], None]] = None,
+    sample_rate: float = 1.0,
 ) -> Transport:
-    """Resolve a transport from a config string (``http``/``curl``/``null``/``log``)."""
+    """Resolve a transport from a config string."""
     normalized = (kind or "http").strip().lower()
     if normalized in ("null", "none", "off"):
         return NullTransport()
     if normalized == "log":
         return LogTransport(sink=on_error)
+    if normalized == "preview":
+        return PreviewTransport(sample_rate=sample_rate, sink=on_error or print)
     # ``curl`` is accepted as an alias for the default HTTP transport (the spec's
     # ``curl`` option is PHP-specific; Python uses urllib).
     return HttpTransport(ingest_url, key, timeout_ms=timeout_ms, on_error=on_error)

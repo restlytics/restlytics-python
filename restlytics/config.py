@@ -85,7 +85,7 @@ class Config:
     service_name: str = "python"
     environment: str = "production"
     sample_rate: float = DEFAULT_SAMPLE_RATE
-    transport: str = "http"  # http | curl (alias) | null | log
+    transport: str = "http"  # http | curl (alias) | preview | null | log
     capture_sql: bool = False
     timeout_ms: int = DEFAULT_TIMEOUT_MS
     max_spans: int = DEFAULT_MAX_SPANS
@@ -102,7 +102,8 @@ class Config:
     @property
     def enabled(self) -> bool:
         """The SDK quietly disables itself when there is no key (safe to ship)."""
-        return bool(self.key) and self.transport not in ("null",)
+        transport = self.transport.strip().lower()
+        return (bool(self.key) or transport == "preview") and transport not in ("null",)
 
     @classmethod
     def from_env(cls, **overrides) -> "Config":

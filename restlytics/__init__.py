@@ -32,6 +32,7 @@ from .tracer import Tracer
 from .transport import (
     HttpTransport,
     LogTransport,
+    PreviewTransport,
     NullTransport,
     Transport,
     TransportDiagnostics,
@@ -52,6 +53,7 @@ __all__ = [
     "HttpTransport",
     "NullTransport",
     "LogTransport",
+    "PreviewTransport",
     "WsgiMiddleware",
     "AsgiMiddleware",
     "DjangoMiddleware",
@@ -114,13 +116,18 @@ def init(
 
         if transport_impl is None:
             # No key -> NullTransport so instrumentation is inert but importable.
-            kind = config.transport if config.key else "null"
+            kind = (
+                config.transport
+                if config.key or config.transport.strip().lower() == "preview"
+                else "null"
+            )
             transport_impl = build_transport(
                 kind,
                 config.ingest_url,
                 config.key,
                 timeout_ms=config.timeout_ms,
                 on_error=on_error,
+                sample_rate=config.sample_rate,
             )
 
         _config = config
