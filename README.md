@@ -191,13 +191,22 @@ no-op transport and stays completely inert.
 
 ## Safety
 
-- **Fire-and-forget**: the OTLP POST runs on a daemon thread after the response,
-  with a hard ~2s timeout. A slow or down ingest endpoint never affects requests.
+- **Fire-and-forget**: a fixed 64-batch queue and one daemon worker own encoding,
+  gzip, and the OTLP POST after the response, with a hard ~2s timeout.
 - **Never throws**: every instrument path swallows its own errors.
 - **Redaction**: SQL normalized (literals stripped), bindings only counted, every outbound
   query value scrubbed, and no request/response headers, bodies, or exception content exported.
 - **Bounded**: per-request span buffer capped (default 2000), state reset per
-  request via `contextvars` (thread- and asyncio-safe).
+  request via `contextvars` (thread- and asyncio-safe). Saturation drops the new
+  batch instead of blocking or growing threads; delivery is never retried.
+
+Delivery counters contain no payload data, and shutdown is explicitly bounded:
+
+```python
+health = restlytics.diagnostics()
+print(health.dropped_batches, health.failed_batches)
+restlytics.shutdown(timeout_ms=2000)
+```
 
 ---
 

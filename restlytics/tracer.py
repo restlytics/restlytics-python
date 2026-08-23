@@ -76,6 +76,11 @@ class Tracer:
         self._sample_rate = sample_rate
         self._max_spans = max_spans
 
+    @property
+    def transport(self) -> Transport:
+        """The configured transport, exposed for diagnostics and graceful shutdown."""
+        return self._transport
+
     # -- state access ------------------------------------------------------ #
     def _state(self) -> Optional[_RequestState]:
         return _current.get()

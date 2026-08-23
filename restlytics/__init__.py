@@ -34,6 +34,7 @@ from .transport import (
     LogTransport,
     NullTransport,
     Transport,
+    TransportDiagnostics,
     build_transport,
 )
 
@@ -41,10 +42,13 @@ __all__ = [
     "__version__",
     "init",
     "get_tracer",
+    "diagnostics",
+    "shutdown",
     "is_initialized",
     "Config",
     "Tracer",
     "Transport",
+    "TransportDiagnostics",
     "HttpTransport",
     "NullTransport",
     "LogTransport",
@@ -160,6 +164,20 @@ def get_config() -> Config:
 
 def is_initialized() -> bool:
     return _tracer is not None
+
+
+def diagnostics() -> Optional[TransportDiagnostics]:
+    """Return payload-free delivery counters when the active transport supports them."""
+    transport = get_tracer().transport
+    getter = getattr(transport, "diagnostics", None)
+    return getter() if callable(getter) else None
+
+
+def shutdown(timeout_ms: int = 2000) -> bool:
+    """Flush accepted telemetry and stop the active transport during process shutdown."""
+    transport = get_tracer().transport
+    closer = getattr(transport, "close", None)
+    return bool(closer(timeout_ms)) if callable(closer) else True
 
 
 # --------------------------------------------------------------------------- #
