@@ -22,7 +22,7 @@ from __future__ import annotations
 import contextvars
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from . import ids
 from .intervals import union_length
@@ -48,8 +48,10 @@ class _RequestState:
     sampled: bool = False
     trace_id: str = ""
     root_parent_span_id: Optional[str] = None
+    root_span_id: str = ""
     root_span: Optional[Span] = None
     spans: List[Span] = field(default_factory=list)
+    log_records: List[Dict[str, Any]] = field(default_factory=list)
     wall_anchor_ns: int = 0
     mono_anchor_ns: int = 0
     db_query_count: int = 0
@@ -72,12 +74,15 @@ class Tracer:
         environment: str,
         sample_rate: float = 1.0,
         max_spans: int = 2000,
+        max_log_records: int = 512,
     ) -> None:
         self._transport = transport
         self._service_name = service_name
         self._environment = environment
         self._sample_rate = sample_rate
         self._max_spans = max_spans
+        self._max_log_records = max(1, int(max_log_records))
+        self._log_exporter: Optional[Callable[[Sequence[Dict[str, Any]]], None]] = None
 
     @property
     def transport(self) -> Transport:
@@ -96,13 +101,35 @@ class Tracer:
         state = self._state()
         return state.trace_id if state else ""
 
+    def current_trace_id(self) -> str:
+        """Return the ambient trace id, including for an unsampled trace."""
+        state = self._state()
+        return state.trace_id if state and state.enabled else ""
+
     def root_span(self) -> Optional[Span]:
         state = self._state()
         return state.root_span if state else None
 
     def root_span_id(self) -> Optional[str]:
-        span = self.root_span()
-        return span.span_id if span else None
+        state = self._state()
+        if state is None or not state.enabled:
+            return None
+        return state.root_span_id or None
+
+    def current_span_id(self) -> Optional[str]:
+        """Return the innermost live span id available to native log hooks.
+
+        Python integrations currently record child operations post-hoc, so the
+        active root is the finest live scope available at log-record time.
+        """
+        return self.root_span_id()
+
+    def current_trace_flags(self) -> Optional[int]:
+        """Return the ambient W3C flags value, or ``None`` outside a trace."""
+        state = self._state()
+        if state is None or not state.enabled:
+            return None
+        return 1 if state.sampled else 0
 
     def sampled(self) -> bool:
         state = self._state()
@@ -111,6 +138,41 @@ class Tracer:
     def reset(self) -> None:
         """Clear per-request state for the current context."""
         _current.set(None)
+
+    def set_log_exporter(
+        self,
+        exporter: Optional[Callable[[Sequence[Dict[str, Any]]], None]],
+    ) -> None:
+        """Register the native-log drain owned by the active logging handler."""
+        self._log_exporter = exporter
+
+    def clear_log_exporter(
+        self,
+        exporter: Callable[[Sequence[Dict[str, Any]]], None],
+    ) -> None:
+        if self._log_exporter is exporter:
+            self._log_exporter = None
+
+    def buffer_log(self, record: Dict[str, Any]) -> bool:
+        """Buffer a log in the ambient unit, returning whether it was handled.
+
+        Reaching the cap triggers a non-blocking size-threshold export through
+        the same bounded transport. Normal request/job completion drains a
+        smaller remainder after the unit finishes.
+        """
+        state = self._state()
+        if state is None or not state.enabled or self._log_exporter is None:
+            return False
+        state.log_records.append(record)
+        if len(state.log_records) >= self._max_log_records:
+            self._flush_logs(state)
+        return True
+
+    def flush_logs(self) -> None:
+        """Non-blockingly hand ambient buffered logs to the transport."""
+        state = self._state()
+        if state is not None:
+            self._flush_logs(state)
 
     # -- lifecycle --------------------------------------------------------- #
     def start_server_span(self, name: str, traceparent: Optional[str] = None) -> None:
@@ -148,6 +210,11 @@ class Tracer:
             state.root_parent_span_id = None
             state.sampled = self._sample_decision(state.trace_id)
 
+        # A non-recording (unsampled) span still has a valid SpanContext. Keeping
+        # its id lets ERROR logs remain correlated even when the trace itself is
+        # intentionally absent.
+        state.root_span_id = ids.span_id()
+
         # Anchor wall-clock <-> monotonic clocks together.
         state.wall_anchor_ns = time.time_ns()
         state.mono_anchor_ns = time.monotonic_ns()
@@ -160,7 +227,7 @@ class Tracer:
         now = self._now_ns(state)
         state.root_span = Span(
             trace_id=state.trace_id,
-            span_id=ids.span_id(),
+            span_id=state.root_span_id,
             parent_span_id=state.root_parent_span_id,
             name=name,
             kind=kind,
@@ -248,22 +315,27 @@ class Tracer:
     def finish_root_span(self, failed: bool = False) -> None:
         """Finish any root span; failure status never includes exception content."""
         state = self._state()
-        if state is None or not (state.enabled and state.sampled) or state.root_span is None:
+        if state is None or not state.enabled:
             self.reset()
             return
+        try:
+            if state.sampled and state.root_span is not None:
+                state.root_span.set_end(self._now_ns(state))
 
-        state.root_span.set_end(self._now_ns(state))
+                self._attach_self_time(state)
+                state.root_span.set_int("restlytics.db_query_count", state.db_query_count)
+                state.root_span.set_string("restlytics.category", state.root_category)
+                if failed:
+                    state.root_span.set_status(STATUS_ERROR)
+                elif state.root_span.status_code() == STATUS_UNSET:
+                    state.root_span.set_status(STATUS_OK)
 
-        self._attach_self_time(state)
-        state.root_span.set_int("restlytics.db_query_count", state.db_query_count)
-        state.root_span.set_string("restlytics.category", state.root_category)
-        if failed:
-            state.root_span.set_status(STATUS_ERROR)
-        elif state.root_span.status_code() == STATUS_UNSET:
-            state.root_span.set_status(STATUS_OK)
-
-        self._flush(state)
-        self.reset()
+                self._flush(state)
+            # Logs are an independent signal and must drain even when this trace
+            # was not sampled.
+            self._flush_logs(state)
+        finally:
+            self.reset()
 
     def _flush(self, state: _RequestState) -> None:
         """Build the OTLP payload and hand it to the transport (fire-and-forget)."""
@@ -275,6 +347,20 @@ class Tracer:
             self._transport.send(payload)
         except Exception:
             # Telemetry must never throw into the host application.
+            pass
+
+    def _flush_logs(self, state: _RequestState) -> None:
+        if not state.log_records:
+            return
+        records = list(state.log_records)
+        state.log_records.clear()
+        exporter = self._log_exporter
+        if exporter is None:
+            return
+        try:
+            exporter(records)
+        except BaseException:
+            # Native logging must remain outside the host failure domain.
             pass
 
     # -- internals --------------------------------------------------------- #

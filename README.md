@@ -1,7 +1,8 @@
 # restlytics — Python SDK
 
-Framework-native request, database, outbound-HTTP and cache tracing for Python,
-shipped to [restlytics](https://restlytics.com) in **OTLP/JSON**.
+Framework-native request, database, outbound-HTTP and cache tracing—plus opt-in,
+trace-correlated native logs—for Python, shipped to
+[restlytics](https://restlytics.com) in **OTLP/JSON**.
 
 > **One contract, every language.** This SDK emits the exact same wire format as
 > every other restlytics SDK (see [`../SPEC.md`](../SPEC.md)) and obeys the same
@@ -59,12 +60,22 @@ RESTLYTICS_TRANSPORT=http
 # the normalized, literal-free db.query.summary is sent regardless. Bindings are
 # NEVER sent, only counted.
 RESTLYTICS_CAPTURE_SQL=false
+
+# Export Python logging records to /v1/logs. OFF by default.
+RESTLYTICS_LOGS=false
+
+# Minimum OTel severityNumber. 13 = WARN (the default); 17 = ERROR.
+RESTLYTICS_LOGS_MIN_SEVERITY=13
 ```
 
 Other recognized vars: `RESTLYTICS_TIMEOUT_MS` (default `2000`),
 `RESTLYTICS_MAX_SPANS` (default `2000`), `RESTLYTICS_IGNORE_PATHS`
 (comma-separated, supports trailing `*`), and per-instrument toggles
 `RESTLYTICS_INSTRUMENT_DB` / `_HTTP` / `_CACHE`.
+
+The equivalent native configuration is `Config(logs=True,
+logs_min_severity=13)`, or `restlytics.init(logs=True,
+logs_min_severity=13)`.
 
 > The SDK does not load `.env` itself — your app already does (e.g.
 > `python-dotenv`, Django settings, your process manager). Call
@@ -200,6 +211,52 @@ decision. Job roots also link to the enqueue span. Failed work exports only an
 `ERROR` status—exception content and carrier payloads are never exported—and
 enqueue time is isolated in `restlytics.self_ns.queue`.
 
+### Native Python logs (opt-in)
+
+Set `RESTLYTICS_LOGS=true` before `restlytics.init()`. The SDK installs one
+`logging.Handler` on the root logger and exports accepted records to
+`{RESTLYTICS_INGEST_URL}/v1/logs` with the same key, gzip encoding, timeout,
+bounded queue, and fire-and-forget behavior as traces:
+
+```python
+import logging
+import restlytics
+
+restlytics.init(logs=True, logs_min_severity=13)
+logging.getLogger("checkout").warning("inventory is low")
+```
+
+For explicit logger placement instead of root capture, leave `logs` disabled
+and opt in directly:
+
+```python
+logger = logging.getLogger("checkout")
+handler = restlytics.instrument_logging(logger, min_severity=17)
+```
+
+Python levels map deterministically to OTel: `DEBUG=5`, `INFO=9`, `WARNING=13
+(WARN)`, `ERROR=17`, and `CRITICAL=18 (ERROR2)`. Custom numeric levels map to
+the nearest standard level, choosing the more severe bucket on a tie.
+
+Inside a request or background unit, each record carries the ambient
+`traceId`, root `spanId`, and sampled flag; outside one, those fields are
+omitted. Logs are independent of trace sampling, so an ERROR emitted during an
+unsampled request is still exported with valid correlation IDs and `flags=0`.
+Because Python DB/HTTP child spans are recorded after the operation completes,
+the live root span is the correlation scope available to native logging.
+
+Message text is scrubbed at capture time. Credential/header/body/binding forms,
+URL credentials and query values, JWT-like tokens, email addresses, exception
+messages/stacks, arbitrary `LogRecord` extras, source paths, and process/thread
+metadata are not exported. Scrubbed messages are capped at 2048 characters.
+Redaction is intentionally conservative; applications should still avoid
+putting secrets or personal data in log messages.
+
+Within an active request/job, up to 512 records are batched and handed to the
+asynchronous transport after the unit completes; reaching 512 first triggers a
+non-blocking size flush. Boot-time and other out-of-context records enqueue
+immediately. `restlytics.shutdown()` performs a bounded final drain.
+
 ---
 
 ## Transports & testing
@@ -228,10 +285,11 @@ and any non-preview transport, the SDK stays completely inert.
 ## Safety
 
 - **Fire-and-forget**: a fixed 64-batch queue and one daemon worker own encoding,
-  gzip, and the OTLP POST after the response, with a hard ~2s timeout.
+  gzip, and OTLP trace/log POSTs after the response, with a hard ~2s timeout.
 - **Never throws**: every instrument path swallows its own errors.
 - **Redaction**: SQL normalized (literals stripped), bindings only counted, every outbound
   query value scrubbed, and no request/response headers, bodies, or exception content exported.
+  Opt-in native logs additionally scrub credentials, PII, and content-bearing fields at source.
 - **Bounded**: per-request span buffer capped (default 2000), state reset per
   request via `contextvars` (thread- and asyncio-safe). Saturation drops the new
   batch instead of blocking or growing threads; delivery is never retried.
@@ -253,8 +311,10 @@ restlytics.shutdown(timeout_ms=2000)
 python3 -m unittest discover -s tests
 ```
 
-The unit tests cover **SQL normalization** and **interval-union self-time** (plus
-the OTLP wire shape) and run with **zero** third-party dependencies.
+The unit tests cover **SQL normalization**, **interval-union self-time**, native
+log severity/correlation/redaction/failure isolation, and the OTLP wire shape.
+They run with **zero** third-party dependencies beyond the optional framework
+gate installed by CI.
 
 ## Cross-language conformance
 

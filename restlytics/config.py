@@ -12,11 +12,12 @@ import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-# Default ingest endpoint; the SDK POSTs to ``{ingest_url}/v1/traces``.
+# Default ingest endpoint; enabled signals use ``/v1/traces`` and ``/v1/logs``.
 DEFAULT_INGEST_URL = "https://ingest.restlytics.com"
 DEFAULT_SAMPLE_RATE = 1.0
 DEFAULT_TIMEOUT_MS = 2000
 DEFAULT_MAX_SPANS = 2000
+DEFAULT_LOGS_MIN_SEVERITY = 13
 
 # Query-string keys scrubbed from outbound ``url.full`` (SPEC section 6).
 DEFAULT_REDACT_QUERY_KEYS: List[str] = [
@@ -87,6 +88,8 @@ class Config:
     sample_rate: float = DEFAULT_SAMPLE_RATE
     transport: str = "http"  # http | curl (alias) | preview | null | log
     capture_sql: bool = False
+    logs: bool = False
+    logs_min_severity: int = DEFAULT_LOGS_MIN_SEVERITY
     timeout_ms: int = DEFAULT_TIMEOUT_MS
     max_spans: int = DEFAULT_MAX_SPANS
 
@@ -124,6 +127,10 @@ class Config:
             sample_rate=_env_float("RESTLYTICS_SAMPLE_RATE", DEFAULT_SAMPLE_RATE),
             transport=os.environ.get("RESTLYTICS_TRANSPORT", "http") or "http",
             capture_sql=_env_bool("RESTLYTICS_CAPTURE_SQL", False),
+            logs=_env_bool("RESTLYTICS_LOGS", False),
+            logs_min_severity=_env_int(
+                "RESTLYTICS_LOGS_MIN_SEVERITY", DEFAULT_LOGS_MIN_SEVERITY
+            ),
             timeout_ms=_env_int("RESTLYTICS_TIMEOUT_MS", DEFAULT_TIMEOUT_MS),
             max_spans=_env_int("RESTLYTICS_MAX_SPANS", DEFAULT_MAX_SPANS),
             instrument_db=_env_bool("RESTLYTICS_INSTRUMENT_DB", True),

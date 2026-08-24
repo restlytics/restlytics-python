@@ -8,7 +8,7 @@ SPEC section 6):
   * Every error path is swallowed. We never raise into the host application.
 
 Wire format (must match the ingestion contract exactly):
-    POST {ingest_url}/v1/traces
+    POST {ingest_url}/v1/traces or {ingest_url}/v1/logs
     X-Restlytics-Key: {key}
     Content-Type: application/json
     Content-Encoding: gzip
@@ -27,7 +27,19 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+
+
+_diagnostic_context = threading.local()
+
+
+def is_reporting_transport_diagnostic() -> bool:
+    """Whether this thread is inside an ``on_error`` callback.
+
+    Native logging handlers use this guard to prevent an ``on_error`` callback
+    that itself logs from creating an infinite failed-export feedback loop.
+    """
+    return bool(getattr(_diagnostic_context, "active", False))
 
 
 @dataclass(frozen=True)
@@ -49,6 +61,16 @@ class Transport:
 
     def send(self, payload: Dict[str, Any]) -> None:  # pragma: no cover - interface
         raise NotImplementedError
+
+    def send_logs(self, payload: Dict[str, Any]) -> None:
+        """Export an OTLP logs payload.
+
+        The compatibility fallback delegates to :meth:`send`, which lets custom
+        capture transports written for the trace-only SDK observe log payloads
+        without an immediate interface migration. Network transports override
+        this method so logs use the distinct OTLP ``/v1/logs`` signal path.
+        """
+        self.send(payload)
 
     def flush(self, timeout_ms: int = 2000) -> bool:
         """Wait for accepted work during process shutdown. Non-HTTP transports are immediate."""
@@ -75,9 +97,19 @@ class LogTransport(Transport):
 
     def __init__(self, sink: Optional[Callable[[str], None]] = None) -> None:
         self.payloads: List[Dict[str, Any]] = []
+        self.trace_payloads: List[Dict[str, Any]] = []
+        self.log_payloads: List[Dict[str, Any]] = []
         self._sink = sink
 
     def send(self, payload: Dict[str, Any]) -> None:
+        self.trace_payloads.append(payload)
+        self._capture(payload)
+
+    def send_logs(self, payload: Dict[str, Any]) -> None:
+        self.log_payloads.append(payload)
+        self._capture(payload)
+
+    def _capture(self, payload: Dict[str, Any]) -> None:
         self.payloads.append(payload)
         if self._sink is not None:
             try:
@@ -100,20 +132,32 @@ class PreviewTransport(Transport):
         self._sink = sink
 
     def send(self, payload: Dict[str, Any]) -> None:
+        self._capture(payload, "traces")
+
+    def send_logs(self, payload: Dict[str, Any]) -> None:
+        self._capture(payload, "logs")
+
+    def _capture(self, payload: Dict[str, Any], signal: str) -> None:
         try:
             encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            span_count = sum(
-                len(scope.get("spans", []))
-                for resource in payload.get("resourceSpans", [])
-                for scope in resource.get("scopeSpans", [])
-            )
+            if signal == "logs":
+                item_count = sum(
+                    len(scope.get("logRecords", []))
+                    for resource in payload.get("resourceLogs", [])
+                    for scope in resource.get("scopeLogs", [])
+                )
+            else:
+                item_count = sum(
+                    len(scope.get("spans", []))
+                    for resource in payload.get("resourceSpans", [])
+                    for scope in resource.get("scopeSpans", [])
+                )
             report = {
                 "mode": "preview",
                 "networkRequestMade": False,
-                "signal": "traces",
+                "signal": signal,
                 "configuredSampleRate": self.sample_rate,
-                "sampled": True,
-                "spanCount": span_count,
+                "itemCount": item_count,
                 "jsonBytes": len(encoded),
                 "gzipBytes": len(gzip.compress(encoded, compresslevel=6)),
                 "redactionPolicyApplied": [
@@ -125,6 +169,12 @@ class PreviewTransport(Transport):
                 ],
                 "payload": payload,
             }
+            if signal == "traces":
+                # Preserve the v1 preview fields for existing consumers.
+                report["sampled"] = True
+                report["spanCount"] = item_count
+            else:
+                report["logRecordCount"] = item_count
             self.reports.append(report)
             if len(self.reports) > 16:
                 del self.reports[0]
@@ -150,7 +200,8 @@ class HttpTransport(Transport):
         on_error: Optional[Callable[[str], None]] = None,
         queue_capacity: int = 64,
     ) -> None:
-        self._url = self._build_url(ingest_url)
+        self._url = self._build_url(ingest_url, "traces")
+        self._logs_url = self._build_url(ingest_url, "logs")
         self._key = key
         self._timeout = max(0.1, timeout_ms / 1000.0)
         self._on_error = on_error
@@ -173,10 +224,16 @@ class HttpTransport(Transport):
         self._worker.start()
 
     @staticmethod
-    def _build_url(ingest_url: str) -> str:
-        return ingest_url.rstrip("/") + "/v1/traces"
+    def _build_url(ingest_url: str, signal: str = "traces") -> str:
+        return ingest_url.rstrip("/") + "/v1/" + signal
 
     def send(self, payload: Dict[str, Any]) -> None:
+        self._enqueue("traces", payload)
+
+    def send_logs(self, payload: Dict[str, Any]) -> None:
+        self._enqueue("logs", payload)
+
+    def _enqueue(self, signal: str, payload: Dict[str, Any]) -> None:
         # The request path performs only a bounded, non-blocking enqueue. Encoding,
         # compression and all I/O happen on the single daemon worker.
         with self._lock:
@@ -189,7 +246,7 @@ class HttpTransport(Transport):
                 self._pending += 1
                 self._accepted += 1
                 try:
-                    self._queue.put_nowait(payload)
+                    self._queue.put_nowait((signal, payload))
                 except queue.Full:
                     self._pending -= 1
                     self._accepted -= 1
@@ -246,8 +303,12 @@ class HttpTransport(Transport):
                 with self._lock:
                     self._in_flight = 1
                 try:
-                    body = self._encode(item)  # type: ignore[arg-type]
-                    delivered = body is not None and self._post(body)
+                    signal, payload = cast(Tuple[str, Dict[str, Any]], item)
+                    body = self._encode(payload)
+                    if signal == "logs":
+                        delivered = body is not None and self._post_logs(body)
+                    else:
+                        delivered = body is not None and self._post(body)
                     with self._lock:
                         if delivered:
                             self._delivered += 1
@@ -269,9 +330,15 @@ class HttpTransport(Transport):
         return gzip.compress(json_bytes, compresslevel=6)
 
     def _post(self, body: bytes) -> bool:
+        return self._post_url(body, self._url)
+
+    def _post_logs(self, body: bytes) -> bool:
+        return self._post_url(body, self._logs_url)
+
+    def _post_url(self, body: bytes, url: str) -> bool:
         try:
             request = urllib.request.Request(
-                self._url,
+                url,
                 data=body,
                 method="POST",
                 headers={
@@ -305,11 +372,15 @@ class HttpTransport(Transport):
     def _report(self, message: str) -> None:
         if self._on_error is None:
             return
+        previous = getattr(_diagnostic_context, "active", False)
         try:
+            _diagnostic_context.active = True
             self._on_error(message)
-        except Exception:
+        except BaseException:
             # Even logging must not throw.
             pass
+        finally:
+            _diagnostic_context.active = previous
 
 
 def build_transport(
