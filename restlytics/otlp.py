@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
+from .redact import is_sensitive_attribute_key, redact_exception_message, redact_url
+
 # Stable identifiers for the SDK, surfaced as resource attributes and the scope
 # name. ``telemetry.sdk.name`` is ``restlytics-<lang>`` per SPEC section 4.
 SDK_NAME = "restlytics-python"
@@ -115,31 +117,38 @@ class Span:
         return self
 
     def set_string(self, key: str, value: str) -> "Span":
-        self._attributes[key] = str(value)
+        if is_sensitive_attribute_key(key):
+            return self
+        raw = str(value)
+        self._attributes[key] = redact_url(raw, ()) if key.lower() == "url.full" else raw
         self._int_keys.pop(key, None)
         return self
 
     def set_int(self, key: str, value: int) -> "Span":
         """Record an int attribute. Serialized as ``intValue`` (a STRING)."""
+        if is_sensitive_attribute_key(key):
+            return self
         self._attributes[key] = int(value)
         self._int_keys[key] = True
         return self
 
     def set_double(self, key: str, value: float) -> "Span":
+        if is_sensitive_attribute_key(key):
+            return self
         self._attributes[key] = float(value)
         self._int_keys.pop(key, None)
         return self
 
     def set_bool(self, key: str, value: bool) -> "Span":
+        if is_sensitive_attribute_key(key):
+            return self
         self._attributes[key] = bool(value)
         self._int_keys.pop(key, None)
         return self
 
     def set_status(self, code: int, message: Optional[str] = None) -> "Span":
         self._status_code = code
-        if message is not None:
-            # Cap to keep payloads bounded; full stack traces don't belong on the wire.
-            self._status_message = message[:1024]
+        self._status_message = redact_exception_message(message)
         return self
 
     # -- accessors --------------------------------------------------------- #

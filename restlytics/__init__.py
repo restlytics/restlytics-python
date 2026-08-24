@@ -32,8 +32,10 @@ from .tracer import Tracer
 from .transport import (
     HttpTransport,
     LogTransport,
+    PreviewTransport,
     NullTransport,
     Transport,
+    TransportDiagnostics,
     build_transport,
 )
 
@@ -41,13 +43,17 @@ __all__ = [
     "__version__",
     "init",
     "get_tracer",
+    "diagnostics",
+    "shutdown",
     "is_initialized",
     "Config",
     "Tracer",
     "Transport",
+    "TransportDiagnostics",
     "HttpTransport",
     "NullTransport",
     "LogTransport",
+    "PreviewTransport",
     "WsgiMiddleware",
     "AsgiMiddleware",
     "DjangoMiddleware",
@@ -110,13 +116,18 @@ def init(
 
         if transport_impl is None:
             # No key -> NullTransport so instrumentation is inert but importable.
-            kind = config.transport if config.key else "null"
+            kind = (
+                config.transport
+                if config.key or config.transport.strip().lower() == "preview"
+                else "null"
+            )
             transport_impl = build_transport(
                 kind,
                 config.ingest_url,
                 config.key,
                 timeout_ms=config.timeout_ms,
                 on_error=on_error,
+                sample_rate=config.sample_rate,
             )
 
         _config = config
@@ -160,6 +171,20 @@ def get_config() -> Config:
 
 def is_initialized() -> bool:
     return _tracer is not None
+
+
+def diagnostics() -> Optional[TransportDiagnostics]:
+    """Return payload-free delivery counters when the active transport supports them."""
+    transport = get_tracer().transport
+    getter = getattr(transport, "diagnostics", None)
+    return getter() if callable(getter) else None
+
+
+def shutdown(timeout_ms: int = 2000) -> bool:
+    """Flush accepted telemetry and stop the active transport during process shutdown."""
+    transport = get_tracer().transport
+    closer = getattr(transport, "close", None)
+    return bool(closer(timeout_ms)) if callable(closer) else True
 
 
 # --------------------------------------------------------------------------- #

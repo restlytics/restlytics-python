@@ -149,8 +149,8 @@ restlytics.instrument_requests()   # for the `requests` library
 restlytics.instrument_httpx()      # for the `httpx` library
 ```
 
-The `url.full` query string is redacted of sensitive keys; request/response
-bodies are never captured.
+Every `url.full` query value is redacted and credentials/fragments are removed;
+request/response headers and bodies are never captured.
 
 ---
 
@@ -173,7 +173,7 @@ don't over-count) on the SERVER span and fire-and-forgets the gzipped OTLP batch
 ## Transports & testing
 
 ```python
-from restlytics.transport import LogTransport, NullTransport
+from restlytics.transport import LogTransport, NullTransport, PreviewTransport
 import restlytics
 
 # Capture payloads instead of sending (great for tests):
@@ -184,20 +184,33 @@ assert lt.payloads  # list of the OTLP dicts that would have been sent
 ```
 
 `RESTLYTICS_TRANSPORT=null` disables delivery while keeping instrumentation;
-`=log` captures/logs payloads. With no `RESTLYTICS_KEY`, the SDK installs a
-no-op transport and stays completely inert.
+`=log` captures/logs payloads. `RESTLYTICS_TRANSPORT=preview` needs no ingest key
+and emits a structured local report containing the redacted production payload,
+configured sampling rate, span count, and JSON/gzip byte sizes. It explicitly
+reports `networkRequestMade: false` and never opens a socket. Set
+`RESTLYTICS_SAMPLE_RATE=1` for a deterministic one-request review. With no key
+and any non-preview transport, the SDK stays completely inert.
 
 ---
 
 ## Safety
 
-- **Fire-and-forget**: the OTLP POST runs on a daemon thread after the response,
-  with a hard ~2s timeout. A slow or down ingest endpoint never affects requests.
+- **Fire-and-forget**: a fixed 64-batch queue and one daemon worker own encoding,
+  gzip, and the OTLP POST after the response, with a hard ~2s timeout.
 - **Never throws**: every instrument path swallows its own errors.
-- **Redaction**: SQL normalized (literals stripped), bindings only counted,
-  outbound query strings + sensitive headers scrubbed, no request/response bodies.
+- **Redaction**: SQL normalized (literals stripped), bindings only counted, every outbound
+  query value scrubbed, and no request/response headers, bodies, or exception content exported.
 - **Bounded**: per-request span buffer capped (default 2000), state reset per
-  request via `contextvars` (thread- and asyncio-safe).
+  request via `contextvars` (thread- and asyncio-safe). Saturation drops the new
+  batch instead of blocking or growing threads; delivery is never retried.
+
+Delivery counters contain no payload data, and shutdown is explicitly bounded:
+
+```python
+health = restlytics.diagnostics()
+print(health.dropped_batches, health.failed_batches)
+restlytics.shutdown(timeout_ms=2000)
+```
 
 ---
 
@@ -210,6 +223,16 @@ python3 -m unittest discover -s tests
 
 The unit tests cover **SQL normalization** and **interval-union self-time** (plus
 the OTLP wire shape) and run with **zero** third-party dependencies.
+
+## Cross-language conformance
+
+CI pins [`restlytics/sdk-conformance@v1.1.0`](https://github.com/restlytics/sdk-conformance)
+and compares the vendored fixture before testing. The suite proves exact semantic OTLP output,
+W3C propagation, root sampling, source redaction, and error-status behavior shared by all seven SDKs.
+The release gate also boots a real FastAPI application and sends its request telemetry over gzip HTTP
+to a deployed-compatible ingest server. It proves route templates, trace continuation, 202/503 handling,
+error status, and that the project key plus request secrets stay out of the payload. FastAPI is beta-validated;
+Django and Flask remain preview until they pass the same real-app gate.
 
 ## License
 

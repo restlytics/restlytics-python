@@ -12,6 +12,18 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+  # Manual escape hatch: the merge trigger above is the only automatic path, so a
+  # release run that fails, is cancelled, or otherwise leaves main untagged cannot
+  # be retried without this. Run it from the Actions tab AGAINST MAIN and pick the
+  # bump level; the new version is computed from the latest tag either way.
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump level
+        required: true
+        default: patch
+        type: choice
+        options: [patch, minor, major]
 
 permissions:
   contents: write
@@ -23,24 +35,35 @@ concurrency:
 jobs:
   release:
     name: Tag & release
-    if: github.event.pull_request.merged == true
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.base.ref }}
+          # No PR context on a manual run; fall back to the dispatched ref.
+          ref: ${{ github.event.pull_request.base.ref || github.ref }}
 
-      - name: Determine bump from label
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Determine bump level
         id: bump
         env:
+          EVENT: ${{ github.event_name }}
+          INPUT_LEVEL: ${{ inputs.bump }}
           LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
         run: |
           set -euo pipefail
           level=""
-          if   printf '%s' "$LABELS" | grep -q '"semver:major"'; then level=major
-          elif printf '%s' "$LABELS" | grep -q '"semver:minor"'; then level=minor
-          elif printf '%s' "$LABELS" | grep -q '"semver:patch"'; then level=patch
+          if [ "$EVENT" = workflow_dispatch ]; then
+            # Manual run: the level comes from the dispatch input, not a PR label.
+            level="$INPUT_LEVEL"
+          elif printf '%s' "$LABELS" | grep -q '"semver:major"'; then level="major"
+          elif printf '%s' "$LABELS" | grep -q '"semver:minor"'; then level="minor"
+          elif printf '%s' "$LABELS" | grep -q '"semver:patch"'; then level="patch"
           fi
           if [ -z "$level" ]; then
             echo "No semver:* label on the merged PR; skipping release."
@@ -80,6 +103,24 @@ jobs:
           sed -i -E 's/^version = "[^"]*"/version = "'"$VERSION"'"/' pyproject.toml
           sed -i -E 's/^SDK_VERSION = "[^"]*"/SDK_VERSION = "'"$VERSION"'"/' restlytics/otlp.py
 
+      - name: Build and validate the release artifact
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build
+          pip install -e ".[dev,fastapi]" "fastapi==0.128.8"
+          python -m pytest -q
+          python -m build --outdir release-dist
+
+          wheel="$(find release-dist -name '*.whl' -print -quit)"
+          smoke_dir="$(mktemp -d)"
+          python -m venv "${smoke_dir}/venv"
+          "${smoke_dir}/venv/bin/pip" install "${wheel}" "fastapi==0.128.8"
+          "${smoke_dir}/venv/bin/python" -c \
+            'import restlytics; assert restlytics.__version__ == "'"${VERSION}"'"'
+
       - name: Tag and release
         if: steps.bump.outputs.skip != 'true'
         env:
@@ -95,7 +136,7 @@ jobs:
           fi
           git tag -a "${TAG}" -m "${TAG}"
           git push origin "${TAG}"
-          gh release create "${TAG}" --title "${TAG}" --generate-notes
+          gh release create "${TAG}" release-dist/* --title "${TAG}" --generate-notes
 
       # --- Publish to PyPI (best-effort: skips if PYPI_API_TOKEN is not configured) ---
       - name: Set up Python
@@ -104,7 +145,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build and publish to PyPI
+      - name: Publish to PyPI
         if: steps.bump.outputs.skip != 'true'
         env:
           TWINE_USERNAME: __token__
@@ -116,6 +157,5 @@ jobs:
             echo "::warning::PYPI_API_TOKEN not set — skipping PyPI publish for ${TAG}."
             exit 0
           fi
-          python -m pip install --upgrade build twine
-          python -m build
-          python -m twine upload --non-interactive dist/*
+          python -m pip install --upgrade twine
+          python -m twine upload --non-interactive release-dist/*
