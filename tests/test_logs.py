@@ -185,6 +185,7 @@ def test_source_redaction_removes_credentials_pii_bodies_bindings_and_exceptions
     for canary in canaries + ("EXTRA_BODY_CANARY", "EXTRA_KEY_CANARY"):
         assert canary not in serialized
     assert "[REDACTED" in serialized
+    assert "https://example.com/pay?token=REDACTED" in serialized
     assert "/private/source/path.py" not in serialized
 
     try:

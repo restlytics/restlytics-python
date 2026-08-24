@@ -129,8 +129,11 @@ def redact_log_message(message: str, max_chars: int = LOG_MESSAGE_MAX_CHARS) -> 
             lambda match: match.group("prefix") + _REDACTED,
             value,
         )
-        value = _LOG_EMAIL_RE.sub("[REDACTED_EMAIL]", value)
+        # Scrub complete URLs before email addresses. Replacing the userinfo
+        # email-shaped suffix first can leave a malformed URL whose username is
+        # handled differently across Python patch releases.
         value = _LOG_URL_RE.sub(lambda match: redact_url(match.group(0), ()), value)
+        value = _LOG_EMAIL_RE.sub("[REDACTED_EMAIL]", value)
         value = _LOG_CONTROL_RE.sub("", value)
         limit = max(0, int(max_chars))
         return value[:limit] if limit else ""
