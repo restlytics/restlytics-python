@@ -30,6 +30,8 @@ SDK_VERSION = "0.1.0"
 KIND_INTERNAL = 1
 KIND_SERVER = 2
 KIND_CLIENT = 3
+KIND_PRODUCER = 4
+KIND_CONSUMER = 5
 
 # OTLP status codes.
 STATUS_UNSET = 0
@@ -82,6 +84,7 @@ class Span:
         "_int_keys",
         "_status_code",
         "_status_message",
+        "_links",
     )
 
     def __init__(
@@ -106,6 +109,7 @@ class Span:
         self._int_keys: "Dict[str, bool]" = {}
         self._status_code = STATUS_UNSET
         self._status_message: Optional[str] = None
+        self._links: List[Dict[str, Any]] = []
 
     # -- mutators ---------------------------------------------------------- #
     def set_name(self, name: str) -> "Span":
@@ -151,6 +155,16 @@ class Span:
         self._status_message = redact_exception_message(message)
         return self
 
+    def add_link(self, trace_id: str, span_id: str, kind: str = "enqueue") -> "Span":
+        self._links.append(
+            {
+                "traceId": trace_id,
+                "spanId": span_id,
+                "attributes": [key_value("restlytics.link.kind", string_value(kind))],
+            }
+        )
+        return self
+
     # -- accessors --------------------------------------------------------- #
     def status_code(self) -> int:
         return self._status_code
@@ -182,6 +196,8 @@ class Span:
 
         if self._attributes:
             span["attributes"] = self._serialize_attributes()
+        if self._links:
+            span["links"] = list(self._links)
 
         # Only attach status when it carries signal (OK/ERROR); UNSET is default.
         if self._status_code != STATUS_UNSET:

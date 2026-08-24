@@ -63,6 +63,10 @@ __all__ = [
     "instrument_django",
     "instrument_requests",
     "instrument_httpx",
+    "job",
+    "command",
+    "schedule",
+    "enqueue",
 ]
 
 __version__ = SDK_VERSION
@@ -249,3 +253,6 @@ def instrument_httpx():
     from .integrations.httpclient import instrument_httpx as _f
 
     return _f()
+
+
+from .background import command, enqueue, job, schedule  # noqa: E402

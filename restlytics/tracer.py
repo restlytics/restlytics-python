@@ -30,12 +30,14 @@ from .otlp import (
     KIND_CLIENT,
     KIND_SERVER,
     STATUS_ERROR,
+    STATUS_OK,
+    STATUS_UNSET,
     Span,
     build_payload,
 )
 from .transport import Transport
 
-_SELF_TIME_CATEGORIES = ("db", "http", "cache", "app")
+_SELF_TIME_CATEGORIES = ("db", "http", "cache", "queue", "app")
 
 
 @dataclass
@@ -51,6 +53,7 @@ class _RequestState:
     wall_anchor_ns: int = 0
     mono_anchor_ns: int = 0
     db_query_count: int = 0
+    root_category: str = "app"
 
 
 # The active request state. ``None`` means "no active trace in this context".
@@ -101,6 +104,10 @@ class Tracer:
         span = self.root_span()
         return span.span_id if span else None
 
+    def sampled(self) -> bool:
+        state = self._state()
+        return bool(state and state.sampled)
+
     def reset(self) -> None:
         """Clear per-request state for the current context."""
         _current.set(None)
@@ -113,7 +120,18 @@ class Tracer:
         fresh trace id. The sampling decision is HEAD-BASED and made exactly once
         here, keyed off the trace id, so every span in the trace shares its fate.
         """
-        state = _RequestState()
+        self.start_root_span(name, KIND_SERVER, "app", traceparent)
+
+    def start_root_span(
+        self,
+        name: str,
+        kind: int,
+        category: str,
+        traceparent: Optional[str] = None,
+        link_parent: bool = False,
+    ) -> None:
+        """Open an HTTP or background root with shared propagation and sampling."""
+        state = _RequestState(root_category=category)
         state.enabled = True
 
         incoming = ids.parse_traceparent(traceparent)
@@ -145,10 +163,13 @@ class Tracer:
             span_id=ids.span_id(),
             parent_span_id=state.root_parent_span_id,
             name=name,
-            kind=KIND_SERVER,
+            kind=kind,
             start_unix_nano=now,
             end_unix_nano=now,
         )
+        state.root_span.set_string("restlytics.category", category)
+        if link_parent and state.root_parent_span_id:
+            state.root_span.add_link(state.trace_id, state.root_parent_span_id)
 
     def add_child_span(
         self,
@@ -182,6 +203,32 @@ class Tracer:
         state.spans.append(span)
         return span
 
+    def start_child_span(
+        self,
+        name: str,
+        category: str,
+        kind: int = KIND_CLIENT,
+        span_id: Optional[str] = None,
+    ) -> Optional[Span]:
+        state = self._state()
+        if state is None or not (state.enabled and state.sampled) or state.root_span is None:
+            return None
+        if len(state.spans) >= self._max_spans:
+            return None
+        now = self._now_ns(state)
+        span = Span(
+            trace_id=state.trace_id,
+            span_id=span_id or ids.span_id(),
+            parent_span_id=state.root_span.span_id,
+            name=name,
+            kind=kind,
+            start_unix_nano=now,
+            end_unix_nano=now,
+        )
+        span.set_string("restlytics.category", category)
+        state.spans.append(span)
+        return span
+
     def increment_db_query_count(self) -> None:
         state = self._state()
         if state is not None:
@@ -196,6 +243,10 @@ class Tracer:
 
     def finish_server_span(self) -> None:
         """Close the root span, compute self-time rollups, and flush the batch."""
+        self.finish_root_span()
+
+    def finish_root_span(self, failed: bool = False) -> None:
+        """Finish any root span; failure status never includes exception content."""
         state = self._state()
         if state is None or not (state.enabled and state.sampled) or state.root_span is None:
             self.reset()
@@ -205,7 +256,11 @@ class Tracer:
 
         self._attach_self_time(state)
         state.root_span.set_int("restlytics.db_query_count", state.db_query_count)
-        state.root_span.set_string("restlytics.category", "app")
+        state.root_span.set_string("restlytics.category", state.root_category)
+        if failed:
+            state.root_span.set_status(STATUS_ERROR)
+        elif state.root_span.status_code() == STATUS_UNSET:
+            state.root_span.set_status(STATUS_OK)
 
         self._flush(state)
         self.reset()
@@ -250,6 +305,7 @@ class Tracer:
         self_db = union_length(by_cat["db"])
         self_http = union_length(by_cat["http"])
         self_cache = union_length(by_cat["cache"])
+        self_queue = union_length(by_cat["queue"])
         # app self-time = explicit app-category child time + the root's own
         # exclusive (uncovered) time. Mirrors the ingestion service's computation.
         self_app = union_length(by_cat["app"]) + max(0, root_dur - union_length(all_intervals))
@@ -257,6 +313,7 @@ class Tracer:
         root.set_int("restlytics.self_ns.db", self_db)
         root.set_int("restlytics.self_ns.http", self_http)
         root.set_int("restlytics.self_ns.cache", self_cache)
+        root.set_int("restlytics.self_ns.queue", self_queue)
         root.set_int("restlytics.self_ns.app", self_app)
 
     @staticmethod

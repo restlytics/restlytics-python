@@ -168,6 +168,38 @@ don't over-count) on the SERVER span and fire-and-forgets the gzipped OTLP batch
 - W3C `traceparent` is continued when present (distributed tracing).
 - Sampling is **head-based** and decided once per trace.
 
+### Background jobs, commands, and schedules
+
+Wrap the framework callback itself so DB/HTTP/cache spans keep using the same
+ambient context. Use stable handler names—never ids, arguments, or payloads.
+
+```python
+from restlytics import command, enqueue, job, schedule
+
+with enqueue(payload, system="redis", destination="billing") as carrier:
+    queue.publish(carrier)
+
+with job(
+    "billing.reconcile",
+    system="redis",
+    destination="billing",
+    attempt=message.attempt,
+    traceparent=message.data.get("__restlytics", {}).get("traceparent"),
+):
+    reconcile(message.data)
+
+with command("manage.py migrate") as execution:
+    execution.set_exit_code(run_migrations())
+
+with schedule("nightly-digest", cron="0 3 * * *"):
+    send_digest()
+```
+
+The namespaced carrier continues the producer trace and preserves its sampling
+decision. Job roots also link to the enqueue span. Failed work exports only an
+`ERROR` status—exception content and carrier payloads are never exported—and
+enqueue time is isolated in `restlytics.self_ns.queue`.
+
 ---
 
 ## Transports & testing
