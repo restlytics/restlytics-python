@@ -8,6 +8,7 @@ are never captured anywhere in the SDK.
 
 from __future__ import annotations
 
+import re
 from typing import Iterable, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -34,6 +35,31 @@ _SENSITIVE_SEGMENTS = {
     "stacktrace",
     "log",
 }
+
+_LOG_EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_LOG_URL_RE = re.compile(r"(?i)https?://[^\s<>\"']+")
+_LOG_AUTH_RE = re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Z0-9._~+/=-]+")
+_LOG_JWT_RE = re.compile(r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+_LOG_OPAQUE_SECRET_RE = re.compile(
+    r"(?i)\b(?:sk|rk)[-_](?:live|test)[-_][A-Za-z0-9_-]{8,}\b|"
+    r"\b(?:gh[pousr]|rl)_[A-Za-z0-9_-]{8,}\b|"
+    r"\bAKIA[0-9A-Z]{16}\b"
+)
+_LOG_SENSITIVE_PAIR_RE = re.compile(
+    r"(?ix)"
+    r"(?P<prefix>[\"']?(?:"
+    r"authorization|proxy[-_.]?authorization|cookie|set[-_.]?cookie|x[-_.]?api[-_.]?key|"
+    r"api[-_.]?key|access[-_.]?token|refresh[-_.]?token|token|password|passwd|secret|"
+    r"credential(?:s)?|request(?:[-_.]?(?:body|payload|form))?|"
+    r"response(?:[-_.]?(?:body|payload|form))?|body|payload|form|bindings?|"
+    r"params?|arguments?|args"
+    r")[\"']?\s*[:=]\s*)"
+    r"(?P<value>\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^\s,;}\]]+)"
+)
+_LOG_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+LOG_MESSAGE_MAX_CHARS = 2048
+_REDACTED = "[REDACTED]"
 
 
 def is_sensitive_attribute_key(key: str) -> bool:
@@ -76,10 +102,44 @@ def redact_url(url: str, query_keys: Iterable[str]) -> str:
         return clean
 
 
-def redact_exception_message(message: Optional[str]) -> None:
+def redact_exception_message(message: Optional[str]) -> Optional[str]:
     """Exception text is intentionally omitted; Restlytics is not a crash tracker."""
     del message
     return None
+
+
+def redact_log_message(message: str, max_chars: int = LOG_MESSAGE_MAX_CHARS) -> str:
+    """Scrub a native log message before it crosses the export boundary.
+
+    Logs are intentionally treated as untrusted, content-bearing input. The
+    scrubber removes common credential/header/body forms, URL credentials and
+    query values, standalone JWT-like tokens, and email addresses. It also caps
+    the result and strips control characters so a hostile ``LogRecord`` cannot
+    grow payloads without bound or inject terminal controls into preview mode.
+
+    This is deliberately more aggressive than span redaction: false-positive
+    redaction is preferable to exporting a credential or personal identifier.
+    """
+    try:
+        value = str(message)
+        value = _LOG_AUTH_RE.sub(_REDACTED, value)
+        value = _LOG_JWT_RE.sub(_REDACTED, value)
+        value = _LOG_OPAQUE_SECRET_RE.sub(_REDACTED, value)
+        value = _LOG_SENSITIVE_PAIR_RE.sub(
+            lambda match: match.group("prefix") + _REDACTED,
+            value,
+        )
+        # Scrub complete URLs before email addresses. Replacing the userinfo
+        # email-shaped suffix first can leave a malformed URL whose username is
+        # handled differently across Python patch releases.
+        value = _LOG_URL_RE.sub(lambda match: redact_url(match.group(0), ()), value)
+        value = _LOG_EMAIL_RE.sub("[REDACTED_EMAIL]", value)
+        value = _LOG_CONTROL_RE.sub("", value)
+        limit = max(0, int(max_chars))
+        return value[:limit] if limit else ""
+    except BaseException:
+        # A hostile ``__str__`` implementation must not escape the SDK.
+        return _REDACTED
 
 
 def is_sensitive_header(name: str, sensitive: Iterable[str]) -> bool:

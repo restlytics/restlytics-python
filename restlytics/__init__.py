@@ -24,9 +24,17 @@ The core (``ids``/``sql``/``intervals``/``otlp``/``transport``/``tracer``/
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
-from .config import Config
+from .config import Config, DEFAULT_LOGS_MIN_SEVERITY
+from .logs import (
+    LoggingHandler,
+    RestlyticsLogHandler,
+    build_log_record,
+    build_logs_payload,
+    map_severity,
+)
 from .otlp import SDK_NAME, SDK_VERSION
 from .tracer import Tracer
 from .transport import (
@@ -43,10 +51,18 @@ __all__ = [
     "__version__",
     "init",
     "get_tracer",
+    "get_config",
+    "get_log_handler",
     "diagnostics",
     "shutdown",
     "is_initialized",
     "Config",
+    "DEFAULT_LOGS_MIN_SEVERITY",
+    "RestlyticsLogHandler",
+    "LoggingHandler",
+    "build_log_record",
+    "build_logs_payload",
+    "map_severity",
     "Tracer",
     "Transport",
     "TransportDiagnostics",
@@ -63,6 +79,7 @@ __all__ = [
     "instrument_django",
     "instrument_requests",
     "instrument_httpx",
+    "instrument_logging",
     "job",
     "command",
     "schedule",
@@ -75,6 +92,8 @@ __version__ = SDK_VERSION
 # get_tracer() so import order never matters.
 _tracer: Optional[Tracer] = None
 _config: Optional[Config] = None
+_log_handler: Optional[RestlyticsLogHandler] = None
+_log_logger: Optional[logging.Logger] = None
 
 
 def init(
@@ -86,6 +105,8 @@ def init(
     sample_rate: Optional[float] = None,
     transport: Optional[str] = None,
     capture_sql: Optional[bool] = None,
+    logs: Optional[bool] = None,
+    logs_min_severity: Optional[int] = None,
     timeout_ms: Optional[int] = None,
     max_spans: Optional[int] = None,
     config: Optional[Config] = None,
@@ -105,6 +126,8 @@ def init(
     global _tracer, _config
 
     try:
+        _remove_log_handler()
+        custom_transport = transport_impl is not None
         if config is None:
             config = Config.from_env(
                 key=key,
@@ -114,6 +137,8 @@ def init(
                 sample_rate=sample_rate,
                 transport=transport,
                 capture_sql=capture_sql,
+                logs=logs,
+                logs_min_severity=logs_min_severity,
                 timeout_ms=timeout_ms,
                 max_spans=max_spans,
             )
@@ -142,6 +167,12 @@ def init(
             sample_rate=config.sample_rate,
             max_spans=config.max_spans,
         )
+        if (
+            config.logs
+            and not isinstance(transport_impl, NullTransport)
+            and (config.enabled or custom_transport)
+        ):
+            _install_log_handler(logging.getLogger(), config.logs_min_severity)
         return _tracer
     except Exception:
         # Initialization must never break host startup. Fall back to an inert tracer.
@@ -184,11 +215,78 @@ def diagnostics() -> Optional[TransportDiagnostics]:
     return getter() if callable(getter) else None
 
 
+def get_log_handler() -> Optional[RestlyticsLogHandler]:
+    """Return the SDK-managed native logging handler, if logs are enabled."""
+    return _log_handler
+
+
+def instrument_logging(
+    logger: Optional[logging.Logger] = None,
+    *,
+    min_severity: Optional[int] = None,
+) -> Optional[RestlyticsLogHandler]:
+    """Attach one Restlytics handler to ``logger`` (the root logger by default).
+
+    Calling this function is itself an explicit opt-in. Most applications can
+    instead set ``RESTLYTICS_LOGS=true`` before :func:`init`, which installs the
+    same handler automatically.
+    """
+    try:
+        config = get_config()
+        return _install_log_handler(
+            logger or logging.getLogger(),
+            config.logs_min_severity if min_severity is None else min_severity,
+        )
+    except BaseException:
+        return None
+
+
 def shutdown(timeout_ms: int = 2000) -> bool:
     """Flush accepted telemetry and stop the active transport during process shutdown."""
     transport = get_tracer().transport
+    _remove_log_handler()
     closer = getattr(transport, "close", None)
     return bool(closer(timeout_ms)) if callable(closer) else True
+
+
+def _install_log_handler(
+    logger: logging.Logger,
+    min_severity: int,
+) -> RestlyticsLogHandler:
+    global _log_handler, _log_logger
+    _remove_log_handler()
+    config = get_config()
+    handler = RestlyticsLogHandler(
+        get_tracer().transport,
+        get_tracer(),
+        config.service_name,
+        config.environment,
+        min_severity=min_severity,
+        flush_timeout_ms=config.timeout_ms,
+    )
+    logger.addHandler(handler)
+    _log_handler = handler
+    _log_logger = logger
+    return handler
+
+
+def _remove_log_handler() -> None:
+    global _log_handler, _log_logger
+    handler = _log_handler
+    logger = _log_logger
+    _log_handler = None
+    _log_logger = None
+    if handler is None:
+        return
+    try:
+        if logger is not None:
+            logger.removeHandler(handler)
+    except BaseException:
+        pass
+    try:
+        handler.close()
+    except BaseException:
+        pass
 
 
 # --------------------------------------------------------------------------- #
