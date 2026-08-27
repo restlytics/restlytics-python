@@ -177,20 +177,21 @@ class RestlyticsLogHandler(logging.Handler):
         finally:
             self._local.emitting = False
 
-    def flush(self) -> None:
+    def flush(self, timeout_ms: Optional[int] = None) -> None:
         try:
             flush_logs = getattr(self._tracer, "flush_logs", None)
             if callable(flush_logs):
                 flush_logs()
-            self._transport.flush(self._flush_timeout_ms)
+            deadline_ms = self._flush_timeout_ms if timeout_ms is None else max(0, int(timeout_ms))
+            self._transport.flush(deadline_ms)
         except BaseException:
             return
 
-    def close(self) -> None:
+    def close(self, timeout_ms: Optional[int] = None) -> None:
         if self._restlytics_closed:
             return
         try:
-            self.flush()
+            self.flush(timeout_ms)
         finally:
             self._restlytics_closed = True
             try:
