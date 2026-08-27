@@ -24,7 +24,7 @@ from .redact import is_sensitive_attribute_key, redact_exception_message, redact
 # name. ``telemetry.sdk.name`` is ``restlytics-<lang>`` per SPEC section 4.
 SDK_NAME = "restlytics-python"
 SDK_LANGUAGE = "python"
-SDK_VERSION = "0.1.0"
+SDK_VERSION = "0.5.0"
 
 # OTLP SpanKind enum values we use.
 KIND_INTERNAL = 1
