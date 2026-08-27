@@ -25,6 +25,7 @@ The core (``ids``/``sql``/``intervals``/``otlp``/``transport``/``tracer``/
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 from .config import Config, DEFAULT_LOGS_MIN_SEVERITY
@@ -38,6 +39,8 @@ from .logs import (
 from .otlp import SDK_NAME, SDK_VERSION
 from .tracer import Tracer
 from .transport import (
+    Exporter,
+    ExporterTransport,
     HttpTransport,
     LogTransport,
     PreviewTransport,
@@ -64,6 +67,8 @@ __all__ = [
     "build_logs_payload",
     "map_severity",
     "Tracer",
+    "Exporter",
+    "ExporterTransport",
     "Transport",
     "TransportDiagnostics",
     "HttpTransport",
@@ -110,6 +115,8 @@ def init(
     timeout_ms: Optional[int] = None,
     max_spans: Optional[int] = None,
     config: Optional[Config] = None,
+    exporter: Optional[Exporter] = None,
+    exporter_queue_capacity: int = 64,
     transport_impl: Optional[Transport] = None,
     on_error=None,
 ) -> Tracer:
@@ -117,8 +124,11 @@ def init(
 
     Configuration resolves from ``RESTLYTICS_*`` environment variables, then any
     explicit keyword overrides win. Pass a ready-made :class:`Config` via
-    ``config=`` or a custom :class:`Transport` via ``transport_impl=`` (used by
-    tests). Safe to call more than once; the last call wins.
+    ``config=`` or a provider-neutral :class:`Exporter` via ``exporter=``.
+    Customer exporter callbacks are isolated behind a bounded asynchronous
+    queue. The legacy ``transport_impl=`` hook remains supported. Safe to call
+    more than once; the last call wins. If both custom hooks are supplied,
+    ``exporter=`` takes precedence.
 
     Never raises: a misconfigured SDK installs a no-op tracer rather than break
     the host application's startup.
@@ -127,7 +137,7 @@ def init(
 
     try:
         _remove_log_handler()
-        custom_transport = transport_impl is not None
+        custom_transport = exporter is not None or transport_impl is not None
         if config is None:
             config = Config.from_env(
                 key=key,
@@ -143,7 +153,13 @@ def init(
                 max_spans=max_spans,
             )
 
-        if transport_impl is None:
+        if exporter is not None:
+            transport_impl = ExporterTransport(
+                exporter,
+                on_error=on_error,
+                queue_capacity=exporter_queue_capacity,
+            )
+        elif transport_impl is None:
             # No key -> NullTransport so instrumentation is inert but importable.
             kind = (
                 config.transport
@@ -210,9 +226,12 @@ def is_initialized() -> bool:
 
 def diagnostics() -> Optional[TransportDiagnostics]:
     """Return payload-free delivery counters when the active transport supports them."""
-    transport = get_tracer().transport
-    getter = getattr(transport, "diagnostics", None)
-    return getter() if callable(getter) else None
+    try:
+        transport = get_tracer().transport
+        getter = getattr(transport, "diagnostics", None)
+        return getter() if callable(getter) else None
+    except BaseException:
+        return None
 
 
 def get_log_handler() -> Optional[RestlyticsLogHandler]:
@@ -243,10 +262,14 @@ def instrument_logging(
 
 def shutdown(timeout_ms: int = 2000) -> bool:
     """Flush accepted telemetry and stop the active transport during process shutdown."""
-    transport = get_tracer().transport
-    _remove_log_handler()
-    closer = getattr(transport, "close", None)
-    return bool(closer(timeout_ms)) if callable(closer) else True
+    try:
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+        transport = get_tracer().transport
+        _remove_log_handler(_remaining_timeout_ms(deadline))
+        closer = getattr(transport, "close", None)
+        return bool(closer(_remaining_timeout_ms(deadline))) if callable(closer) else True
+    except BaseException:
+        return False
 
 
 def _install_log_handler(
@@ -270,7 +293,7 @@ def _install_log_handler(
     return handler
 
 
-def _remove_log_handler() -> None:
+def _remove_log_handler(timeout_ms: Optional[int] = None) -> None:
     global _log_handler, _log_logger
     handler = _log_handler
     logger = _log_logger
@@ -284,9 +307,13 @@ def _remove_log_handler() -> None:
     except BaseException:
         pass
     try:
-        handler.close()
+        handler.close(timeout_ms)
     except BaseException:
         pass
+
+
+def _remaining_timeout_ms(deadline: float) -> int:
+    return max(0, int((deadline - time.monotonic()) * 1000))
 
 
 # --------------------------------------------------------------------------- #

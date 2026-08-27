@@ -56,8 +56,44 @@ class TransportDiagnostics:
     closed: bool
 
 
+class Exporter:
+    """Provider-neutral customer exporter contract.
+
+    Implement :meth:`export_traces` and, when native logs are enabled,
+    :meth:`export_logs`. Restlytics invokes these callbacks on a dedicated
+    bounded worker through :class:`ExporterTransport`; callbacks never run on
+    an instrumented request/job path. Payloads are already source-redacted,
+    production-shaped OTLP dictionaries and never contain the Restlytics key.
+
+    Lifecycle callbacks receive a maximum wait in milliseconds. Implementations
+    should honor it and return ``False`` when their own drain cannot complete.
+    ``None`` is accepted as a successful return for ergonomic compatibility.
+    """
+
+    def export_traces(self, payload: Dict[str, Any]) -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def export_logs(self, payload: Dict[str, Any]) -> None:
+        """Export one OTLP logs batch; the default intentionally drops it."""
+        del payload
+
+    def flush(self, timeout_ms: int = 2000) -> bool:
+        """Drain provider-owned work within ``timeout_ms`` milliseconds."""
+        del timeout_ms
+        return True
+
+    def shutdown(self, timeout_ms: int = 2000) -> bool:
+        """Perform the provider's bounded final drain and cleanup."""
+        return self.flush(timeout_ms)
+
+
 class Transport:
-    """Transport interface. ``send`` accepts a fully-built OTLP payload dict."""
+    """Legacy SDK transport interface.
+
+    Existing ``transport_impl=`` integrations remain supported. New customer
+    providers should implement :class:`Exporter` and pass ``exporter=`` to
+    :func:`restlytics.init`; the SDK then supplies bounded async isolation.
+    """
 
     def send(self, payload: Dict[str, Any]) -> None:  # pragma: no cover - interface
         raise NotImplementedError
@@ -183,6 +219,221 @@ class PreviewTransport(Transport):
         except Exception:
             # Preview retains the SDK's never-raise guarantee.
             pass
+
+
+class ExporterTransport(Transport):
+    """Bounded, asynchronous safety boundary around a customer :class:`Exporter`.
+
+    Export callbacks run serially on one daemon worker. Saturation drops new
+    batches instead of blocking or growing memory, and every customer exception
+    (including lifecycle/diagnostic exceptions) is contained. ``flush`` and
+    ``close`` wait no longer than the caller's deadline even if a provider
+    ignores it or blocks forever.
+    """
+
+    def __init__(
+        self,
+        exporter: Exporter,
+        *,
+        on_error: Optional[Callable[[str], None]] = None,
+        queue_capacity: int = 64,
+    ) -> None:
+        self.exporter = exporter
+        self._on_error = on_error
+        self._capacity = max(1, int(queue_capacity))
+        self._queue: "queue.Queue[object]" = queue.Queue(maxsize=self._capacity)
+        self._lock = threading.Lock()
+        self._closed = False
+        self._in_flight = 0
+        self._pending = 0
+        self._accepted = 0
+        self._delivered = 0
+        self._dropped = 0
+        self._failed = 0
+        self._stop = object()
+        self._worker = threading.Thread(
+            target=self._run,
+            name="restlytics-custom-exporter",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def send(self, payload: Dict[str, Any]) -> None:
+        self._enqueue("traces", payload)
+
+    def send_logs(self, payload: Dict[str, Any]) -> None:
+        self._enqueue("logs", payload)
+
+    def diagnostics(self) -> TransportDiagnostics:
+        with self._lock:
+            return TransportDiagnostics(
+                accepted_batches=self._accepted,
+                delivered_batches=self._delivered,
+                dropped_batches=self._dropped,
+                failed_batches=self._failed,
+                queued_batches=self._queue.qsize(),
+                in_flight_batches=self._in_flight,
+                queue_capacity=self._capacity,
+                closed=self._closed,
+            )
+
+    def flush(self, timeout_ms: int = 2000) -> bool:
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+        if not self._await_pending(deadline):
+            return False
+        return self._invoke_lifecycle("flush", deadline) is True
+
+    def close(self, timeout_ms: int = 2000) -> bool:
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+        with self._lock:
+            if self._closed and not self._worker.is_alive():
+                return True
+            self._closed = True
+
+        drained = self._await_pending(deadline)
+        shutdown = self._invoke_lifecycle("shutdown", deadline) if drained else None
+        # Stop only after the lifecycle callback actually completed. If it timed
+        # out, leave the daemon worker available for a later bounded retry.
+        if drained and shutdown is not None and self._worker.is_alive():
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                self._queue.put(self._stop, timeout=remaining)
+            except queue.Full:
+                return False
+            self._worker.join(max(0.0, deadline - time.monotonic()))
+        return bool(shutdown is True and not self._worker.is_alive())
+
+    def _enqueue(self, signal: str, payload: Dict[str, Any]) -> None:
+        try:
+            with self._lock:
+                if self._closed:
+                    self._dropped += 1
+                    unavailable = True
+                else:
+                    unavailable = False
+                    try:
+                        self._queue.put_nowait((signal, payload))
+                    except queue.Full:
+                        self._dropped += 1
+                        full = True
+                    else:
+                        self._accepted += 1
+                        self._pending += 1
+                        full = False
+            if unavailable:
+                self._report("restlytics: batch dropped because custom exporter is closed")
+            elif full:
+                self._report("restlytics: batch dropped because custom exporter queue is full")
+        except BaseException as exc:
+            # Payload enqueue and even hostile mapping implementations are outside
+            # the host application's failure domain.
+            with self._lock:
+                self._dropped += 1
+            self._report("restlytics: custom exporter enqueue failed: {0}".format(exc))
+
+    def _await_pending(self, deadline: float) -> bool:
+        while True:
+            with self._lock:
+                pending = self._pending
+            if pending == 0:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.005)
+
+    def _invoke_lifecycle(self, operation: str, deadline: float) -> Optional[bool]:
+        if not self._worker.is_alive():
+            return None
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            return None
+        event = threading.Event()
+        result: Dict[str, bool] = {}
+        task = (operation, int(remaining * 1000), event, result)
+        try:
+            self._queue.put(task, timeout=remaining)
+        except BaseException:
+            return None
+        if not event.wait(max(0.0, deadline - time.monotonic())):
+            return None
+        return bool(result.get("ok", False))
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            try:
+                if item is self._stop:
+                    return
+                task = cast(Tuple[Any, ...], item)
+                operation = str(task[0])
+                if operation in ("traces", "logs"):
+                    self._run_export(operation, cast(Dict[str, Any], task[1]))
+                else:
+                    self._run_lifecycle(
+                        operation,
+                        cast(int, task[1]),
+                        cast(threading.Event, task[2]),
+                        cast(Dict[str, bool], task[3]),
+                    )
+            except BaseException as exc:
+                # Absolute worker backstop. Normal callback failures are counted
+                # inside the operation-specific methods below.
+                self._report("restlytics: custom exporter worker failed: {0}".format(exc))
+            finally:
+                self._queue.task_done()
+
+    def _run_export(self, signal: str, payload: Dict[str, Any]) -> None:
+        with self._lock:
+            self._in_flight = 1
+        try:
+            callback_name = "export_logs" if signal == "logs" else "export_traces"
+            callback = getattr(self.exporter, callback_name)
+            callback(payload)
+        except BaseException as exc:
+            with self._lock:
+                self._failed += 1
+            self._report("restlytics: custom {0} export failed: {1}".format(signal, exc))
+        else:
+            with self._lock:
+                self._delivered += 1
+        finally:
+            with self._lock:
+                self._in_flight = 0
+                self._pending -= 1
+
+    def _run_lifecycle(
+        self,
+        operation: str,
+        timeout_ms: int,
+        event: threading.Event,
+        result: Dict[str, bool],
+    ) -> None:
+        try:
+            callback = getattr(self.exporter, operation, None)
+            if not callable(callback) and operation == "shutdown":
+                callback = getattr(self.exporter, "close", None)
+            if not callable(callback):
+                result["ok"] = True
+            else:
+                value = callback(max(0, timeout_ms))
+                result["ok"] = True if value is None else bool(value)
+        except BaseException as exc:
+            result["ok"] = False
+            self._report("restlytics: custom exporter {0} failed: {1}".format(operation, exc))
+        finally:
+            event.set()
+
+    def _report(self, message: str) -> None:
+        if self._on_error is None:
+            return
+        previous = getattr(_diagnostic_context, "active", False)
+        try:
+            _diagnostic_context.active = True
+            self._on_error(message)
+        except BaseException:
+            pass
+        finally:
+            _diagnostic_context.active = previous
 
 
 class HttpTransport(Transport):

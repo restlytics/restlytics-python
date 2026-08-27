@@ -261,6 +261,64 @@ immediately. `restlytics.shutdown()` performs a bounded final drain.
 
 ## Transports & testing
 
+### Customer exporters
+
+Use the public, provider-neutral `Exporter` contract when a design partner
+needs to hand production-shaped telemetry to its own pipeline. It receives the
+same source-redacted OTLP dictionaries used by the built-in HTTP transport for
+both signals; the SDK key and other tenant credentials are never passed to it.
+
+```python
+from restlytics import Exporter
+import restlytics
+
+
+class EventPipelineExporter(Exporter):
+    def __init__(self, client):
+        self.client = client
+
+    def export_traces(self, payload):
+        self.client.publish_json("observability.traces", payload)
+
+    def export_logs(self, payload):
+        self.client.publish_json("observability.logs", payload)
+
+    def flush(self, timeout_ms=2000):
+        return self.client.flush(timeout_ms=timeout_ms)
+
+    def shutdown(self, timeout_ms=2000):
+        return self.client.close(timeout_ms=timeout_ms)
+
+
+restlytics.init(
+    service_name="checkout-api",
+    environment="production",
+    logs=True,
+    exporter=EventPipelineExporter(existing_pipeline_client),
+)
+```
+
+`init(exporter=...)` is a full delivery mode and does not require a Restlytics
+key. Export callbacks run serially on one SDK-owned daemon worker behind a
+fixed 64-batch queue (override with `exporter_queue_capacity=`). Enqueue is
+non-blocking: saturation drops the new batch and increments diagnostics instead
+of delaying the host. Exceptions—including `BaseException` subclasses—from
+export, flush, shutdown, and `on_error` callbacks are contained.
+
+`flush(timeout_ms)` and `shutdown(timeout_ms)` should honor the supplied deadline
+and return `False` if their provider-owned work remains. The SDK also bounds its
+own wait and returns `False` if a callback blocks or fails. Exporter payloads
+must be treated as read-only. Provider retries, persistence, authentication, and
+delivery acknowledgements remain the provider's responsibility; the SDK does
+not add unbounded retries or pass its project key across this boundary.
+
+The older `transport_impl=` hook remains available for existing SDK-internal
+and test transports. New integrations should use `exporter=` so they receive
+the bounded asynchronous safety wrapper automatically. If both are supplied,
+`exporter=` takes precedence.
+
+### Built-in and test transports
+
 ```python
 from restlytics.transport import LogTransport, NullTransport, PreviewTransport
 import restlytics
