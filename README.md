@@ -19,6 +19,15 @@ trace-correlated native logs—for Python, shipped to
 
 ## Install
 
+> [!IMPORTANT]
+> **Not yet published to PyPI.** `restlytics` returns 404 today — publication is tracked in
+> [restlytics/app#232](https://github.com/restlytics/app/issues/232). Until it lands, install
+> directly from this repository:
+>
+> ```bash
+> pip install "git+https://github.com/restlytics/restlytics-python@v0.5.0"
+> ```
+
 ```bash
 pip install restlytics
 ```
