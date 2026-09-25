@@ -162,7 +162,9 @@ class MyAppConfig(AppConfig):
 
 ### Outbound HTTP (optional)
 
-Best-effort CLIENT spans for outbound calls — call once after `init()`:
+Best-effort CLIENT spans for outbound calls — call once after `init()`. Both
+integrations inject the CLIENT span's W3C `traceparent`, including `flags=00`
+when the ambient trace is unsampled:
 
 ```python
 restlytics.instrument_requests()   # for the `requests` library

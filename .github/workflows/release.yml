@@ -15,7 +15,7 @@ on:
   # Manual escape hatch: the merge trigger above is the only automatic path, so a
   # release run that fails, is cancelled, or otherwise leaves main untagged cannot
   # be retried without this. Run it from the Actions tab AGAINST MAIN and pick the
-  # bump level; the new version is computed from the latest tag either way.
+  # bump level; ENABLE_PACKAGE_RELEASE must also be true, including for manual runs.
   workflow_dispatch:
     inputs:
       bump:
@@ -35,7 +35,7 @@ concurrency:
 jobs:
   release:
     name: Tag & release
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    if: vars.ENABLE_PACKAGE_RELEASE == 'true' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -94,6 +94,17 @@ jobs:
           echo "version=$new" >> "$GITHUB_OUTPUT"
           echo "tag=v$new" >> "$GITHUB_OUTPUT"
 
+      - name: Verify PyPI release credentials
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TWINE_PASSWORD:-}" ]; then
+            echo "::error::PYPI_API_TOKEN is required before a release can create a tag."
+            exit 1
+          fi
+
       - name: Bump version in sources
         if: steps.bump.outputs.skip != 'true'
         env:
@@ -138,7 +149,7 @@ jobs:
           git push origin "${TAG}"
           gh release create "${TAG}" release-dist/* --title "${TAG}" --generate-notes
 
-      # --- Publish to PyPI (best-effort: skips if PYPI_API_TOKEN is not configured) ---
+      # Registry publication is part of release success, never a best-effort tail step.
       - name: Set up Python
         if: steps.bump.outputs.skip != 'true'
         uses: actions/setup-python@v5
@@ -153,9 +164,5 @@ jobs:
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
-          if [ -z "${TWINE_PASSWORD:-}" ]; then
-            echo "::warning::PYPI_API_TOKEN not set — skipping PyPI publish for ${TAG}."
-            exit 0
-          fi
           python -m pip install --upgrade twine
           python -m twine upload --non-interactive release-dist/*

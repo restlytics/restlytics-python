@@ -36,8 +36,14 @@ def instrument_requests() -> bool:
     def _send(self, request, **kwargs):
         tracer = get_tracer()
         cfg = get_config()
-        if not (tracer.is_sampled() and cfg.instrument_http):
+        if not cfg.instrument_http:
             return original(self, request, **kwargs)
+
+        context = tracer.outbound_context()
+        if context is None:
+            return original(self, request, **kwargs)
+        traceparent, span_id = context
+        request.headers["traceparent"] = traceparent
 
         start_ns = tracer.now_ns()
         status = None
@@ -60,6 +66,7 @@ def instrument_requests() -> bool:
                     start_ns=start_ns,
                     end_ns=tracer.now_ns(),
                     errored=errored,
+                    span_id=span_id,
                 )
             except Exception:
                 pass
@@ -84,8 +91,14 @@ def instrument_httpx() -> bool:
     def _send(self, request, **kwargs):
         tracer = get_tracer()
         cfg = get_config()
-        if not (tracer.is_sampled() and cfg.instrument_http):
+        if not cfg.instrument_http:
             return original(self, request, **kwargs)
+
+        context = tracer.outbound_context()
+        if context is None:
+            return original(self, request, **kwargs)
+        traceparent, span_id = context
+        request.headers["traceparent"] = traceparent
 
         start_ns = tracer.now_ns()
         status = None
@@ -108,6 +121,7 @@ def instrument_httpx() -> bool:
                     start_ns=start_ns,
                     end_ns=tracer.now_ns(),
                     errored=errored,
+                    span_id=span_id,
                 )
             except Exception:
                 pass
@@ -117,12 +131,12 @@ def instrument_httpx() -> bool:
     return True
 
 
-def _record(tracer, cfg, method, url, status, start_ns, end_ns, errored) -> None:
+def _record(tracer, cfg, method, url, status, start_ns, end_ns, errored, span_id) -> None:
     redacted = redact_url(url or "", cfg.redact_query_keys)
     host = _host_of(url)
 
     name = "{0} {1}".format(method or "GET", host or "http")
-    span = tracer.add_child_span(name, start_ns, end_ns, kind=KIND_CLIENT)
+    span = tracer.add_child_span(name, start_ns, end_ns, kind=KIND_CLIENT, span_id=span_id)
     if span is None:
         return
 
