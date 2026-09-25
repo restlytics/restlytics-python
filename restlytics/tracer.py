@@ -22,7 +22,7 @@ from __future__ import annotations
 import contextvars
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import ids
 from .intervals import union_length
@@ -130,6 +130,23 @@ class Tracer:
         if state is None or not state.enabled:
             return None
         return 1 if state.sampled else 0
+
+    def outbound_context(self) -> Optional[Tuple[str, str]]:
+        """Return ``(traceparent, child_span_id)`` for an outbound operation.
+
+        Unsampled traces still propagate a valid non-recording SpanContext with
+        flags ``00``. Sampled HTTP integrations pass the returned id back into
+        :meth:`add_child_span`, keeping the downstream parent and local CLIENT
+        span identical.
+        """
+        state = self._state()
+        if state is None or not state.enabled or not state.trace_id:
+            return None
+        child_span_id = ids.span_id()
+        return (
+            ids.format_traceparent(state.trace_id, child_span_id, state.sampled),
+            child_span_id,
+        )
 
     def sampled(self) -> bool:
         state = self._state()
@@ -244,6 +261,7 @@ class Tracer:
         start_ns: int,
         end_ns: int,
         kind: int = KIND_CLIENT,
+        span_id: Optional[str] = None,
     ) -> Optional[Span]:
         """Create a CLIENT child span over an absolute ``[start_ns, end_ns]`` window.
 
@@ -260,7 +278,7 @@ class Tracer:
 
         span = Span(
             trace_id=state.trace_id,
-            span_id=ids.span_id(),
+            span_id=span_id or ids.span_id(),
             parent_span_id=state.root_span.span_id,
             name=name,
             kind=kind,
